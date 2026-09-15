@@ -16,8 +16,8 @@ VSVersionInfo(
         StringStruct('LegalCopyright', 'Ekinao https://www.ekinao.com'),
         StringStruct('FileDescription', 'DesktopMascot'),
         StringStruct('ProductName', 'DesktopMascot'),
-        StringStruct('ProductVersion', '1.0.0.0'),
-        StringStruct('FileVersion', '1.0.0.0')
+        StringStruct('ProductVersion', '1.0.1.0'),
+        StringStruct('FileVersion', '1.0.1.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])

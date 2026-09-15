@@ -73,6 +73,11 @@ def asset_path(filename):
 
 
 # Animation timing is fixed internally, as in the Android edition.
+# Smooth movement timing (separate from behavior decisions)
+ANDROID_TICK_MS = 50
+ANDROID_WALK_STEP_MULTIPLIER = 2.0
+ANDROID_SCREEN_MARGIN = 50
+
 WALK_FRAME_TIME_MS = 120
 
 
@@ -386,6 +391,14 @@ class MascotWindow(QWidget):
 
         self.behavior_timer.start(1000)
 
+        # Movement runs independently from the behavior state machine.
+        # This keeps walking smooth instead of moving once per second.
+        self.movement_timer = QTimer(self)
+        self.movement_timer.timeout.connect(
+            self.walk_step
+        )
+        self.movement_timer.start(ANDROID_TICK_MS)
+
         self.animation_timer = QTimer(self)
 
         self.animation_timer.timeout.connect(
@@ -521,7 +534,8 @@ class MascotWindow(QWidget):
                     self.start_rest()
 
         elif self.state == "walk":
-            self.walk_step()
+            # Actual movement is handled by movement_timer.
+            pass
 
         elif self.state == "rest":
 
@@ -541,7 +555,7 @@ class MascotWindow(QWidget):
             .availableGeometry()
         )
 
-        margin = 50
+        margin = ANDROID_SCREEN_MARGIN
 
         max_x = max(
             margin,
@@ -565,17 +579,9 @@ class MascotWindow(QWidget):
             random.randint(min_y, max_y)
         )
 
-        distance = math.sqrt(
-            (
-                self.target.x() - self.x()
-            ) ** 2
-            +
-            (
-                self.target.y() - self.y()
-            ) ** 2
-        )
-
-        walk_seconds = random.randint(
+        # Android treats walk duration as the WALK state's lifetime;
+        # it does not derive walking speed from that duration.
+        self.sleep_counter = random.randint(
             get_int(
                 "Timing",
                 "walk_duration_min"
@@ -586,19 +592,11 @@ class MascotWindow(QWidget):
             )
         )
 
-        configured_speed = get_float(
-            "Timing",
-            "walk_speed"
-        )
-
-        self.walk_speed = max(
-            1,
-            (
-                distance
-                /
-                max(1, walk_seconds)
-            )
-            * configured_speed
+        # Desktop walking speed is configurable.  The default is 2.0,
+        # giving an effective step of 4 px every 50 ms.
+        self.walk_speed = (
+            get_float("Timing", "walk_speed")
+            * ANDROID_WALK_STEP_MULTIPLIER
         )
 
         if self.target.x() < self.x():
@@ -611,8 +609,11 @@ class MascotWindow(QWidget):
 
     def walk_step(self):
 
+        if self.state != "walk":
+            return
+
         if self.target is None:
-            self.stop_walk()
+            self.start_walk()
             return
 
         dx = self.target.x() - self.x()
@@ -622,15 +623,46 @@ class MascotWindow(QWidget):
             dx * dx + dy * dy
         )
 
-        if distance <= self.walk_speed:
+        # Match Android: once the target is reached, immediately choose
+        # another target and keep walking until the WALK duration expires.
+        if distance < 4:
+            screen = self.screen().availableGeometry()
+            margin = ANDROID_SCREEN_MARGIN
 
-            self.move(self.target)
+            max_x = max(
+                margin,
+                screen.width()
+                - self.width()
+                - margin
+            )
+            max_y = max(
+                margin,
+                screen.height()
+                - self.height()
+                - margin
+            )
 
-            self.stop_walk()
+            min_x = min(margin, max_x)
+            min_y = min(margin, max_y)
 
+            self.target = QPoint(
+                random.randint(min_x, max_x),
+                random.randint(min_y, max_y)
+            )
             return
 
-        ratio = self.walk_speed / distance
+        if abs(dx) >= 1:
+            self.direction = "left" if dx < 0 else "right"
+
+        step = max(
+            0.5,
+            self.walk_speed
+        )
+
+        ratio = min(
+            1.0,
+            step / distance
+        )
 
         self.move(
             self.x() + int(dx * ratio),

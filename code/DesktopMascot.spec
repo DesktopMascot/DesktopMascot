@@ -3,7 +3,7 @@ from pathlib import Path
 project_dir = Path(SPECPATH)
 
 # Windows application metadata
-APP_VERSION = "1.0.0.0"
+APP_VERSION = "1.0.1.0"
 
 a = Analysis(
     ["main.py"],
