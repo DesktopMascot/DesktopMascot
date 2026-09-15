@@ -1,0 +1,6 @@
+*.ini
+*.py[cod]
+code/__pycache__/
+code/build/
+code/dist/
+mascot.conf
