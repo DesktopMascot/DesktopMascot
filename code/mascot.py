@@ -72,12 +72,9 @@ def asset_path(filename):
     )
 
 
-# Animation timing is fixed internally, as in the Android edition.
-# Smooth movement timing (separate from behavior decisions)
 ANDROID_TICK_MS = 50
 ANDROID_WALK_STEP_MULTIPLIER = 2.0
 ANDROID_SCREEN_MARGIN = 50
-
 WALK_FRAME_TIME_MS = 120
 
 
@@ -534,8 +531,12 @@ class MascotWindow(QWidget):
                     self.start_rest()
 
         elif self.state == "walk":
-            # Actual movement is handled by movement_timer.
-            pass
+            # Movement is handled by movement_timer, but the walk state
+            # lifetime is still controlled by the behavior timer.
+            self.sleep_counter -= 1
+
+            if self.sleep_counter <= 0:
+                self.stop_walk()
 
         elif self.state == "rest":
 
