@@ -31,8 +31,10 @@ defaults = {
         "disable_breathing": "false",
     },
 
-    "AI": {
-        "url": "http://127.0.0.1/chat_api",
+    "Network": {
+        "chat_url": "http://127.0.0.1/chat_api",
+        "event_url": "http://127.0.0.1/event_api",
+        "event_poll": "0",
         "ignore_ssl_errors": "false",
         "socks_proxy": "",
         "connect_timeout": "10",
@@ -45,18 +47,49 @@ config = configparser.ConfigParser()
 
 
 def load_config():
+    changed = False
+
     if not CONFIG_FILE.exists():
         config.read_dict(defaults)
-        with CONFIG_FILE.open(
-            "w",
-            encoding="utf-8"
-        ) as file:
-            config.write(file)
+        changed = True
     else:
         config.read(
             CONFIG_FILE,
             encoding="utf-8"
         )
+
+        # Migrate the old [AI] section to [Network]
+        if config.has_section("AI"):
+            if not config.has_section("Network"):
+                config.add_section("Network")
+
+            for key, value in config.items("AI"):
+                if key == "url":
+                    if not config.has_option("Network", "chat_url"):
+                        config.set("Network", "chat_url", value)
+                elif not config.has_option("Network", key):
+                    config.set("Network", key, value)
+
+            config.remove_section("AI")
+            changed = True
+
+    # Add any newly introduced settings to an existing configuration.
+    for section, values in defaults.items():
+        if not config.has_section(section):
+            config.add_section(section)
+            changed = True
+
+        for key, value in values.items():
+            if not config.has_option(section, key):
+                config.set(section, key, value)
+                changed = True
+
+    if changed:
+        with CONFIG_FILE.open(
+            "w",
+            encoding="utf-8"
+        ) as file:
+            config.write(file)
 
 
 load_config()

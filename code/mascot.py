@@ -2,6 +2,7 @@ import sys
 import math
 import random
 import html
+import json
 import os
 
 if os.name == "posix":   # Linux
@@ -28,6 +29,7 @@ from PySide6.QtGui import QPixmap, QFont, QFontDatabase, QTransform
 from PySide6.QtCore import (
     Qt,
     QPoint,
+    QEvent,
     QTimer,
     QUrl,
     QUrlQuery,
@@ -169,19 +171,43 @@ class ChatWindow(QWidget):
         self.message_sound.setSource(QUrl.fromLocalFile(sound_file))
         self.message_sound.setVolume(0.9)
 
+    def changeEvent(self, event):
+        if (
+            event.type() == QEvent.ActivationChange
+            and self.isActiveWindow()
+        ):
+            self.mascot.raise_()
+            self.raise_()
+
+        super().changeEvent(event)
+
+    def set_input_enabled(self, enabled):
+        self.input.setEnabled(enabled)
+        self.send_button.setEnabled(enabled)
+
+        if enabled:
+            self.send_button.setText("💬")
+            self.send_button.setToolTip("Send")
+        else:
+            self.send_button.setText("⌛")
+            self.send_button.setToolTip("Waiting")
+
     def clear_chat(self):
         self.messages.clear()
         self.history.clear()
         self.pending = False
         self.input.clear()
-        self.input.setEnabled(True)
-        self.send_button.setEnabled(True)
+        self.set_input_enabled(True)
 
     def add_user_message(self, text):
         self.messages.append(("user", text))
         self.render_messages()
 
     def add_response_message(self, text):
+        self.messages.append(("response", text))
+        self.render_messages()
+
+    def add_event_message(self, text):
         self.messages.append(("response", text))
         self.render_messages()
 
@@ -242,8 +268,7 @@ class ChatWindow(QWidget):
         self.add_user_message(text)
         self.add_waiting_message()
         self.pending = True
-        self.input.setEnabled(False)
-        self.send_button.setEnabled(False)
+        self.set_input_enabled(False)
         self.mascot.send_ai_request(text)
 
     def request_finished(self, text, success=True):
@@ -251,8 +276,7 @@ class ChatWindow(QWidget):
         # remove the pending bubble before adding the final message.
         self.remove_waiting_message()
         self.pending = False
-        self.input.setEnabled(True)
-        self.send_button.setEnabled(True)
+        self.set_input_enabled(True)
         if success:
             self.add_response_message(text)
             self.message_sound.play()
@@ -263,8 +287,7 @@ class ChatWindow(QWidget):
     def request_cancelled(self):
         self.remove_waiting_message()
         self.pending = False
-        self.input.setEnabled(True)
-        self.send_button.setEnabled(True)
+        self.set_input_enabled(True)
         self.input.setFocus()
 
 
@@ -305,6 +328,15 @@ class MascotWindow(QWidget):
         # obsolete reply from updating the UI.
         self.request_generation = 0
         self.current_reply = None
+
+        # Event monitoring uses its own request/reply and never cancels
+        # or changes the AI chat request.
+        self.event_since = 0
+        self.event_reply = None
+        self.event_timer = QTimer(self)
+        self.event_timer.setSingleShot(True)
+        self.event_timer.timeout.connect(self.poll_event)
+
         self.request_timeout_timer = QTimer(self)
         self.request_timeout_timer.setSingleShot(True)
         self.request_timeout_generation = 0
@@ -413,6 +445,12 @@ class MascotWindow(QWidget):
         )
 
         self.configure_proxy()
+
+        # ----------------------------------------------------
+        # Event monitor
+        # ----------------------------------------------------
+
+        self.start_event_monitor()
 
         # ----------------------------------------------------
         # Chat
@@ -886,7 +924,7 @@ class MascotWindow(QWidget):
     def configure_proxy(self):
 
         proxy_string = get_str(
-            "AI",
+            "Network",
             "socks_proxy"
         ).strip()
 
@@ -981,11 +1019,193 @@ class MascotWindow(QWidget):
                 )
             )
 
+    # ========================================================
+    # Event monitor
+    # ========================================================
+
+    def start_event_monitor(self):
+        poll_seconds = get_int("Network", "event_poll")
+
+        self.event_since = 0
+
+        if poll_seconds <= 0:
+            self.event_timer.stop()
+            return
+
+        # Poll immediately on startup with ?since=0.
+        self.poll_event()
+
+    def schedule_next_event_poll(self):
+        poll_seconds = get_int("Network", "event_poll")
+
+        if poll_seconds > 0:
+            self.event_timer.start(poll_seconds * 1000)
+        else:
+            self.event_timer.stop()
+
+    def poll_event(self):
+        poll_seconds = get_int("Network", "event_poll")
+
+        if poll_seconds <= 0:
+            self.event_timer.stop()
+            return
+
+        # Never overlap event requests. Normally this is unnecessary
+        # because the timer is single-shot, but it also protects against
+        # manual/re-entrant calls.
+        if self.event_reply is not None:
+            return
+
+        url_string = get_str(
+            "Network",
+            "event_url"
+        ).strip()
+
+        if not url_string:
+            self.schedule_next_event_poll()
+            return
+
+        url = QUrl(url_string)
+
+        if not url.isValid():
+            self.schedule_next_event_poll()
+            return
+
+        query = QUrlQuery(url.query())
+        query.addQueryItem(
+            "since",
+            str(self.event_since)
+        )
+        url.setQuery(query)
+
+        request = QNetworkRequest(url)
+        request.setRawHeader(
+            QByteArray(b"User-Agent"),
+            QByteArray(b"api")
+        )
+
+        reply = self.network_manager.get(request)
+        self.event_reply = reply
+
+        reply.sslErrors.connect(
+            self.handle_event_ssl_errors
+        )
+        reply.finished.connect(
+            lambda r=reply:
+            self.handle_event_reply_finished(r)
+        )
+
+        print(
+            "Event request started:",
+            url.toString()
+        )
+
+    def handle_event_ssl_errors(self, errors):
+        reply = self.event_reply
+        if reply is None:
+            return
+
+        ignore = get_bool(
+            "Network",
+            "ignore_ssl_errors"
+        )
+
+        if ignore:
+            print(
+                "WARNING: Ignoring SSL certificate errors for event request."
+            )
+            reply.ignoreSslErrors()
+        else:
+            print(
+                "SSL certificate errors detected for event request."
+            )
+
+    def handle_event_reply_finished(self, reply):
+        if self.event_reply is reply:
+            self.event_reply = None
+
+        try:
+            error = reply.error()
+
+            if error != QNetworkReply.NoError:
+                print(
+                    "Event request failed:",
+                    reply.errorString()
+                )
+                return
+
+            status_code = reply.attribute(
+                QNetworkRequest.HttpStatusCodeAttribute
+            )
+
+            data = reply.readAll()
+
+            if (
+                status_code is not None
+                and
+                (
+                    status_code < 200
+                    or
+                    status_code >= 300
+                )
+            ):
+                print(
+                    "Event request HTTP error:",
+                    status_code
+                )
+                return
+
+            try:
+                payload = json.loads(
+                    bytes(data).decode(
+                        "utf-8",
+                        errors="replace"
+                    )
+                )
+            except (ValueError, TypeError):
+                return
+
+            if not isinstance(payload, dict):
+                return
+
+            if "at" not in payload or "html" not in payload:
+                return
+
+            event_at = payload["at"]
+            event_html = payload["html"]
+
+            try:
+                event_at = int(event_at)
+            except (TypeError, ValueError):
+                return
+
+            if not isinstance(event_html, str):
+                return
+
+            self.event_since = event_at
+            self.show_event_message(event_html)
+
+        finally:
+            reply.deleteLater()
+            self.schedule_next_event_poll()
+
+    def show_event_message(self, event_html):
+        # If chat is closed, open it exactly as a mascot click would.
+        # enter_chat_mode clears old chat only when no chat session exists;
+        # while AI chat is active, this branch is not taken.
+        if self.state != "chat":
+            self.enter_chat_mode()
+
+        # If an AI request is currently pending, do not touch its waiting
+        # bubble or input controls. The event is simply appended.
+        self.chat.add_event_message(event_html)
+        self.chat.message_sound.play()
+
     def send_ai_request(self, text):
 
         url_string = get_str(
-            "AI",
-            "url"
+            "Network",
+            "chat_url"
         ).strip()
 
         if not url_string:
@@ -1066,7 +1286,7 @@ class MascotWindow(QWidget):
 
         self.current_reply = reply
 
-        timeout_seconds = get_int("AI", "read_timeout")
+        timeout_seconds = get_int("Network", "read_timeout")
         self.request_timeout_generation = generation
         if timeout_seconds > 0:
             self.request_timeout_timer.start(timeout_seconds * 1000)
@@ -1112,7 +1332,7 @@ class MascotWindow(QWidget):
             return
 
         ignore = get_bool(
-            "AI",
+            "Network",
             "ignore_ssl_errors"
         )
 
@@ -1291,6 +1511,8 @@ class MascotWindow(QWidget):
 
                 if self.state == "chat":
                     self.position_chat()
+                    self.raise_()
+                    self.chat.raise_()
 
             event.accept()
 
@@ -1318,6 +1540,14 @@ class MascotWindow(QWidget):
     def closeEvent(self, event):
 
         self.cancel_network_request()
+
+        self.event_timer.stop()
+
+        if self.event_reply is not None:
+            if self.event_reply.isRunning():
+                self.event_reply.abort()
+            self.event_reply.deleteLater()
+            self.event_reply = None
 
         if self.chat:
             self.chat.close()
